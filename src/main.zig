@@ -6,14 +6,17 @@ pub fn main(init: std.process.Init) !void {
     var writer = std.Io.File.stdout().writer(io, &.{});
     const stdout = &writer.interface;
 
-    try stdout.writeAll("$ ");
-
     var buf: [1024]u8 = undefined;
     var reader = std.Io.File.stdin().reader(io, &buf);
     const stdin = &reader.interface;
 
-    const cmd = try stdin.takeDelimiterExclusive('\n');
+    while (true) {
+        try stdout.writeAll("$ ");
 
-    try stdout.print("{s}: command not found\n", .{cmd});
-    try stdout.flush();
+        const cmd = try stdin.takeDelimiter('\n');
+        if (cmd) |c| {
+            try stdout.print("{s}: command not found\n", .{c});
+            try stdout.flush();
+        }
+    }
 }
