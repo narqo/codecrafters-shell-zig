@@ -13,10 +13,12 @@ pub fn main(init: std.process.Init) !void {
     while (true) {
         try stdout.writeAll("$ ");
 
-        const cmd = try stdin.takeDelimiter('\n');
-        if (cmd) |c| {
-            try stdout.print("{s}: command not found\n", .{c});
-            try stdout.flush();
+        const line = try stdin.takeDelimiterInclusive('\n');
+        const cmd = std.mem.trimEnd(u8, line, "\n");
+        if (std.mem.eql(u8, cmd, "exit")) {
+            break;
         }
+        try stdout.print("{s}: command not found\n", .{cmd});
+        try stdout.flush();
     }
 }
