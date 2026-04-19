@@ -7,6 +7,17 @@ const builtins = &[_][]const u8{
     "type",
 };
 
+const Cmd = enum {
+    // cd,
+    echo,
+    exit,
+    type,
+
+    fn fromString(str: []const u8) ?Cmd {
+        return std.meta.stringToEnum(Cmd, str);
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
@@ -23,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
         const line = try stdin.takeDelimiterExclusive('\n');
         stdin.toss(1); // advance and discard the new line
 
-        const cmd, const args = blk: {
+        const cmd_str, const args = blk: {
             if (std.mem.cutScalar(u8, line, ' ')) |pair| {
                 break :blk pair;
             } else {
@@ -31,22 +42,26 @@ pub fn main(init: std.process.Init) !void {
             }
         };
 
-        if (std.mem.eql(u8, cmd, "exit")) {
-            break;
-        } else if (std.mem.eql(u8, cmd, "echo")) {
-            try stdout.print("{s}\n", .{args});
-        } else if (std.mem.eql(u8, cmd, "type")) {
-            for (builtins) |c| {
-                if (std.mem.eql(u8, c, args)) {
-                    try stdout.print("{s} is a shell builtin\n", .{args});
-                    break;
-                }
-            } else {
-                try stdout.print("{s}: not found\n", .{args});
-            }
-        } else {
+        const cmd = Cmd.fromString(cmd_str) orelse {
             try stdout.print("{s}: command not found\n", .{line});
+            try stdout.flush();
+            continue;
+        };
+
+        switch (cmd) {
+            .exit => break,
+            .echo => {
+                try stdout.print("{s}\n", .{args});
+            },
+            .type => {
+                if (Cmd.fromString(args)) |_| {
+                    try stdout.print("{s} is a shell builtin\n", .{args});
+                } else {
+                    try stdout.print("{s}: not found\n", .{args});
+                }
+            },
         }
+
         try stdout.flush();
     }
 }
