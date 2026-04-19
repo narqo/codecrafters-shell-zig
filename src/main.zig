@@ -1,5 +1,12 @@
 const std = @import("std");
 
+const builtins = &[_][]const u8{
+    "cd",
+    "echo",
+    "exit",
+    "type",
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
@@ -28,6 +35,15 @@ pub fn main(init: std.process.Init) !void {
             break;
         } else if (std.mem.eql(u8, cmd, "echo")) {
             try stdout.print("{s}\n", .{args});
+        } else if (std.mem.eql(u8, cmd, "type")) {
+            for (builtins) |c| {
+                if (std.mem.eql(u8, c, args)) {
+                    try stdout.print("{s} is a shell builtin\n", .{args});
+                    break;
+                }
+            } else {
+                try stdout.print("{s}: not found\n", .{args});
+            }
         } else {
             try stdout.print("{s}: command not found\n", .{line});
         }
