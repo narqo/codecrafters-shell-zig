@@ -13,12 +13,24 @@ pub fn main(init: std.process.Init) !void {
     while (true) {
         try stdout.writeAll("$ ");
 
-        const line = try stdin.takeDelimiterInclusive('\n');
-        const cmd = std.mem.trimEnd(u8, line, "\n");
+        const line = try stdin.takeDelimiterExclusive('\n');
+        stdin.toss(1); // advance and discard the new line
+
+        const cmd, const args = blk: {
+            if (std.mem.cutScalar(u8, line, ' ')) |pair| {
+                break :blk pair;
+            } else {
+                break :blk .{ line, "" };
+            }
+        };
+
         if (std.mem.eql(u8, cmd, "exit")) {
             break;
+        } else if (std.mem.eql(u8, cmd, "echo")) {
+            try stdout.print("{s}\n", .{args});
+        } else {
+            try stdout.print("{s}: command not found\n", .{line});
         }
-        try stdout.print("{s}: command not found\n", .{cmd});
         try stdout.flush();
     }
 }
