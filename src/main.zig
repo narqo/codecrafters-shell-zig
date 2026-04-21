@@ -51,27 +51,45 @@ pub fn main(init: std.process.Init) !void {
 
         const path_env = init.environ_map.get("PATH") orelse "";
 
-        const cmd = Cmd.fromString(cmd_str) orelse {
-            try stdout.print("{s}: command not found\n", .{line});
-            try stdout.flush();
-            continue;
-        };
+        if (Cmd.fromString(cmd_str)) |cmd| {
+            switch (cmd) {
+                .exit => break,
+                .echo => {
+                    try stdout.print("{s}\n", .{args});
+                },
+                .type => {
+                    if (Cmd.fromString(args)) |_| {
+                        try stdout.print("{s} is a shell builtin\n", .{args});
+                    } else if (findExecutable(alloc, io, cwd, path_env, args)) |exe_path| {
+                        try stdout.print("{s} is {s}\n", .{ args, exe_path });
+                    } else |err| switch (err) {
+                        FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
+                        else => return err,
+                    }
+                },
+            }
+        } else if (findExecutable(alloc, io, cwd, path_env, cmd_str)) |exe_path| {
+            var args_list: std.ArrayList([]const u8) = .empty;
+            defer args_list.deinit(alloc);
 
-        switch (cmd) {
-            .exit => break,
-            .echo => {
-                try stdout.print("{s}\n", .{args});
-            },
-            .type => {
-                if (Cmd.fromString(args)) |_| {
-                    try stdout.print("{s} is a shell builtin\n", .{args});
-                } else if (findExecutable(alloc, io, cwd, path_env, args)) |exe_path| {
-                    try stdout.print("{s} is {s}\n", .{ args, exe_path });
-                } else |err| switch (err) {
-                    FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
-                    else => return err,
-                }
-            },
+            try args_list.append(alloc, exe_path);
+
+            var it = try std.process.Args.IteratorGeneral(.{}).init(alloc, args);
+            defer it.deinit();
+            while (it.next()) |arg| {
+                try args_list.append(alloc, arg);
+            }
+
+            var child = try std.process.spawn(io, .{
+                .argv = args_list.items,
+            });
+            defer child.kill(io);
+
+            const term = try child.wait(io);
+            _ = term;
+        } else |err| switch (err) {
+            FindError.NotFound => try stdout.print("{s}: command not found\n", .{line}),
+            else => return err,
         }
 
         try stdout.flush();
