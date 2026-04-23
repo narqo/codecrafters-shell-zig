@@ -1,4 +1,5 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 
 const builtins = &[_][]const u8{
     "cd",
@@ -18,10 +19,16 @@ const Cmd = enum {
     }
 };
 
+const Context = struct {
+    gpa: Allocator,
+    io: std.Io,
+
+    cwd: std.Io.Dir,
+    environ_map: *std.process.Environ.Map,
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-
-    const cwd = std.Io.Dir.cwd();
 
     var writer = std.Io.File.stdout().writer(io, &.{});
     const stdout = &writer.interface;
@@ -30,69 +37,79 @@ pub fn main(init: std.process.Init) !void {
     var reader = std.Io.File.stdin().reader(io, &buf);
     const stdin = &reader.interface;
 
+    const ctx = Context{
+        .gpa = init.gpa,
+        .io = io,
+        .environ_map = init.environ_map,
+        .cwd = std.Io.Dir.cwd(),
+    };
+
     while (true) {
-        try stdout.writeAll("$ ");
+        try runLoop(ctx, stdin, stdout);
+    }
+}
 
-        const line = try stdin.takeDelimiterExclusive('\n');
-        stdin.toss(1); // advance and discard the new line
+fn runLoop(ctx: Context, stdin: *std.Io.Reader, stdout: *std.Io.Writer) !void {
+    try stdout.writeAll("$ ");
+    defer stdout.flush() catch unreachable; // runtime panic on failure
 
-        const cmd_str, const args = blk: {
-            if (std.mem.cutScalar(u8, line, ' ')) |pair| {
-                break :blk pair;
-            } else {
-                break :blk .{ line, "" };
-            }
-        };
+    const line = try stdin.takeDelimiterExclusive('\n');
+    stdin.toss(1); // advance and discard the new line
 
-        var arena = std.heap.ArenaAllocator.init(init.gpa);
-        defer arena.deinit();
+    const cmd_str, const args = blk: {
+        if (std.mem.cutScalar(u8, line, ' ')) |pair| {
+            break :blk pair;
+        } else {
+            break :blk .{ line, "" };
+        }
+    };
 
-        const alloc = arena.allocator();
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
 
-        const path_env = init.environ_map.get("PATH") orelse "";
+    const alloc = arena.allocator();
 
-        if (Cmd.fromString(cmd_str)) |cmd| {
-            switch (cmd) {
-                .exit => break,
-                .echo => {
-                    try stdout.print("{s}\n", .{args});
-                },
-                .type => {
-                    if (Cmd.fromString(args)) |_| {
-                        try stdout.print("{s} is a shell builtin\n", .{args});
-                    } else if (findExecutable(alloc, io, cwd, path_env, args)) |exe_path| {
-                        try stdout.print("{s} is {s}\n", .{ args, exe_path });
-                    } else |err| switch (err) {
-                        FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
-                        else => return err,
-                    }
-                },
-            }
-        } else if (findExecutable(alloc, io, cwd, path_env, cmd_str)) |exe_path| {
-            var args_list: std.ArrayList([]const u8) = .empty;
-            defer args_list.deinit(alloc);
+    const path_env = ctx.environ_map.get("PATH") orelse "";
 
-            try args_list.append(alloc, exe_path);
+    if (Cmd.fromString(cmd_str)) |cmd| {
+        switch (cmd) {
+            .exit => return,
+            .echo => {
+                try stdout.print("{s}\n", .{args});
+            },
+            .type => {
+                if (Cmd.fromString(args)) |_| {
+                    try stdout.print("{s} is a shell builtin\n", .{args});
+                } else if (findExecutable(alloc, ctx.io, ctx.cwd, path_env, args)) |exe_path| {
+                    try stdout.print("{s} is {s}\n", .{ args, exe_path });
+                } else |err| switch (err) {
+                    FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
+                    else => return err,
+                }
+            },
+        }
+    } else if (findExecutable(alloc, ctx.io, ctx.cwd, path_env, cmd_str)) |exe_path| {
+        var args_list: std.ArrayList([]const u8) = .empty;
+        defer args_list.deinit(alloc);
 
-            var it = try std.process.Args.IteratorGeneral(.{}).init(alloc, args);
-            defer it.deinit();
-            while (it.next()) |arg| {
-                try args_list.append(alloc, arg);
-            }
+        try args_list.append(alloc, exe_path);
 
-            var child = try std.process.spawn(io, .{
-                .argv = args_list.items,
-            });
-            defer child.kill(io);
-
-            const term = try child.wait(io);
-            _ = term;
-        } else |err| switch (err) {
-            FindError.NotFound => try stdout.print("{s}: command not found\n", .{line}),
-            else => return err,
+        var it = try std.process.Args.IteratorGeneral(.{}).init(alloc, args);
+        defer it.deinit();
+        while (it.next()) |arg| {
+            try args_list.append(alloc, arg);
         }
 
-        try stdout.flush();
+        var child = try std.process.spawn(ctx.io, .{
+            .argv = args_list.items,
+        });
+        defer child.kill(ctx.io);
+
+        const term = try child.wait(ctx.io);
+        _ = term;
+    } else |err| switch (err) {
+        FindError.NotFound => try stdout.print("{s}: command not found\n", .{line}),
+        else => return err,
     }
 }
 
