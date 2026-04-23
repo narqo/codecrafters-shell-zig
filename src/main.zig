@@ -85,7 +85,7 @@ fn runLoop(ctx: Context, stdin: *std.Io.Reader, stdout: *std.Io.Writer) !void {
                 } else if (findExecutable(alloc, ctx.io, ctx.cwd, path_env, args)) |exe_path| {
                     try stdout.print("{s} is {s}\n", .{ args, exe_path });
                 } else |err| switch (err) {
-                    FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
+                    FindExecutableError.NotFound => try stdout.print("{s}: not found\n", .{args}),
                     else => return err,
                 }
             },
@@ -121,12 +121,12 @@ fn runLoop(ctx: Context, stdin: *std.Io.Reader, stdout: *std.Io.Writer) !void {
         const term = try child.wait(ctx.io);
         _ = term;
     } else |err| switch (err) {
-        FindError.NotFound => try stdout.print("{s}: command not found\n", .{line}),
+        FindExecutableError.NotFound => try stdout.print("{s}: command not found\n", .{line}),
         else => return err,
     }
 }
 
-const FindError = error{NotFound};
+const FindExecutableError = error{NotFound};
 
 fn findExecutable(alloc: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path_env: []const u8, args: []const u8) ![]const u8 {
     var paths_iter = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
@@ -141,5 +141,5 @@ fn findExecutable(alloc: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path_en
             return alloc.dupe(u8, exe_path);
         }
     }
-    return FindError.NotFound;
+    return FindExecutableError.NotFound;
 }
