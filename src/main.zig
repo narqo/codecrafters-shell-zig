@@ -10,7 +10,7 @@ const builtins = &[_][]const u8{
 };
 
 const Cmd = enum {
-    // cd,
+    cd,
     echo,
     exit,
     pwd,
@@ -88,6 +88,12 @@ fn runLoop(ctx: Context, stdin: *std.Io.Reader, stdout: *std.Io.Writer) !void {
                     FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
                     else => return err,
                 }
+            },
+            .cd => {
+                std.process.setCurrentPath(ctx.io, args) catch |err| switch (err) {
+                    std.process.SetCurrentPathError.FileNotFound => try stdout.print("cd {s}: No such file or directory\n", .{args}),
+                    else => return err,
+                };
             },
             .pwd => {
                 var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
