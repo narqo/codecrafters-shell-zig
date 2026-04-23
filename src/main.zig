@@ -5,6 +5,7 @@ const builtins = &[_][]const u8{
     "cd",
     "echo",
     "exit",
+    "pwd",
     "type",
 };
 
@@ -12,6 +13,7 @@ const Cmd = enum {
     // cd,
     echo,
     exit,
+    pwd,
     type,
 
     fn fromString(str: []const u8) ?Cmd {
@@ -86,6 +88,11 @@ fn runLoop(ctx: Context, stdin: *std.Io.Reader, stdout: *std.Io.Writer) !void {
                     FindError.NotFound => try stdout.print("{s}: not found\n", .{args}),
                     else => return err,
                 }
+            },
+            .pwd => {
+                var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const n = try std.process.currentPath(ctx.io, &buf);
+                try stdout.print("{s}\n", .{buf[0..n]});
             },
         }
     } else if (findExecutable(alloc, ctx.io, ctx.cwd, path_env, cmd_str)) |exe_path| {
