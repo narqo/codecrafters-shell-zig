@@ -153,16 +153,33 @@ fn expandPath(alloc: std.mem.Allocator, environ: *std.process.Environ.Map, path:
     if (path.len == 0 or path[0] != '~') {
         return alloc.dupe(u8, path);
     }
-    const p = path[1..];
-    if (p.len == 0 or p[0] == '/') {
-        const home = environ.get("HOME") orelse "~";
-        return std.fs.path.join(alloc, &[_][]const u8{ home, p });
+
+    var user_home: ?[]const u8 = null;
+    var path_tail = path[1..];
+    if (path_tail.len == 0 or path_tail[0] == '/') {
+        user_home = environ.get("HOME");
     }
-    // TODO: Follow Python's os.path.expanduser
-    // On Unix, an initial ~ is replaced by the environment variable HOME if it is set;
-    // otherwise the current user’s home directory is looked up in the password directory through the built-in module pwd.
-    // An initial ~user is looked up directly in the password directory.
-    unreachable;
+
+    if (user_home == null) {
+        var user, path_tail = blk: {
+            if (std.mem.findScalar(u8, path_tail, '/')) |pos| {
+                break :blk .{ path_tail[0..pos], path_tail[pos + 1 ..] };
+            } else {
+                break :blk .{ path_tail, "" };
+            }
+        };
+        if (user.len == 0) {
+            // TODO: get current user
+            user = "varankinv";
+        }
+        const userZ = try alloc.dupeSentinel(u8, user, 0);
+        defer alloc.free(userZ);
+        const pw = std.c.getpwnam(userZ) orelse return error.UserNotFound;
+        std.debug.print("user {s}, uid {d}, path {s}\n", .{ user, pw.uid, path });
+        user_home = if (pw.dir) |dir| std.mem.span(dir) else null;
+    }
+
+    return std.fs.path.join(alloc, &[_][]const u8{ user_home orelse "~", path_tail });
 }
 
 test "expandPath" {
@@ -189,7 +206,7 @@ test "expandPath" {
         var empty_environ = std.process.Environ.Map.init(gpa);
         defer empty_environ.deinit();
 
-        const expanded = try expandPath(gpa, &empty_environ, "~/");
+        const expanded = try expandPath(gpa, &empty_environ, "~");
         defer gpa.free(expanded);
         try testing.expectEqualStrings(expanded, "~/");
     }
