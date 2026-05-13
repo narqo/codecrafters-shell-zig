@@ -1,4 +1,7 @@
 const std = @import("std");
+
+const args = @import("args.zig");
+
 const Allocator = std.mem.Allocator;
 
 const builtins = &[_][]const u8{
@@ -35,9 +38,12 @@ pub fn main(init: std.process.Init) !void {
     var writer = std.Io.File.stdout().writer(io, &.{});
     const stdout = &writer.interface;
 
-    var buf: [1024]u8 = undefined;
-    var reader = std.Io.File.stdin().reader(io, &buf);
+    var stdin_reader_buf: [1024]u8 = undefined;
+    var reader = std.Io.File.stdin().reader(io, &stdin_reader_buf);
     const stdin = &reader.interface;
+
+    var args_buf: [1024]u8 = undefined;
+    var args_parser = args.parser(&args_buf);
 
     while (true) {
         var arena = std.heap.ArenaAllocator.init(init.gpa);
@@ -52,80 +58,89 @@ pub fn main(init: std.process.Init) !void {
             .cwd = std.Io.Dir.cwd(),
         };
 
-        try runLoop(ctx, stdin, stdout);
+        try stdout.writeAll("$ ");
+        defer stdout.flush() catch unreachable; // runtime panic on failure
+
+        const raw_cmd_line = try stdin.takeDelimiterExclusive('\n');
+        stdin.toss(1); // advance and discard the new line
+
+        if (raw_cmd_line.len == 0) continue;
+
+        const parsed_args = try args_parser.parse(alloc, raw_cmd_line);
+        defer alloc.free(parsed_args);
+
+        const cmd_str = parsed_args[0];
+        const argv = if (parsed_args.len > 1) parsed_args[1..] else &.{};
+
+        if (Cmd.fromString(cmd_str)) |cmd| {
+            switch (cmd) {
+                .exit => return,
+
+                .cd => try execCd(ctx, stdout, argv),
+                .echo => try execEcho(ctx, stdout, argv),
+                .pwd => try execPwd(ctx, stdout, argv),
+                .type => try execType(ctx, stdout, argv),
+            }
+            continue;
+        }
+
+        const path_env = ctx.environ.get("PATH") orelse "";
+
+        if (findExecutable(ctx.alloc, ctx.io, ctx.cwd, path_env, cmd_str)) |exe_path| {
+            var args_list: std.ArrayList([]const u8) = .empty;
+            defer args_list.deinit(ctx.alloc);
+
+            try args_list.append(ctx.alloc, exe_path);
+            try args_list.appendSlice(ctx.alloc, argv);
+
+            var child = try std.process.spawn(ctx.io, .{
+                .argv = args_list.items,
+            });
+            defer child.kill(ctx.io);
+
+            const term = try child.wait(ctx.io);
+            _ = term;
+        } else |err| switch (err) {
+            FindExecutableError.NotFound => try stdout.print("{s}: command not found\n", .{raw_cmd_line}),
+            else => return err,
+        }
     }
 }
 
-fn runLoop(ctx: Context, stdin: *std.Io.Reader, stdout: *std.Io.Writer) !void {
-    try stdout.writeAll("$ ");
-    defer stdout.flush() catch unreachable; // runtime panic on failure
+fn execEcho(ctx: Context, stdout: *std.Io.Writer, argv: []const []const u8) !void {
+    const s = try std.mem.join(ctx.alloc, " ", argv);
+    try stdout.print("{s}\n", .{s});
+}
 
-    const line = try stdin.takeDelimiterExclusive('\n');
-    stdin.toss(1); // advance and discard the new line
-
-    const cmd_str, const args = blk: {
-        if (std.mem.cutScalar(u8, line, ' ')) |pair| {
-            break :blk pair;
-        } else {
-            break :blk .{ line, "" };
-        }
-    };
-
+fn execType(ctx: Context, stdout: *std.Io.Writer, argv: []const []const u8) !void {
     const path_env = ctx.environ.get("PATH") orelse "";
 
-    if (Cmd.fromString(cmd_str)) |cmd| {
-        switch (cmd) {
-            .exit => return,
-            .echo => {
-                try stdout.print("{s}\n", .{args});
-            },
-            .type => {
-                if (Cmd.fromString(args)) |_| {
-                    try stdout.print("{s} is a shell builtin\n", .{args});
-                } else if (findExecutable(ctx.alloc, ctx.io, ctx.cwd, path_env, args)) |exe_path| {
-                    try stdout.print("{s} is {s}\n", .{ args, exe_path });
-                } else |err| switch (err) {
-                    FindExecutableError.NotFound => try stdout.print("{s}: not found\n", .{args}),
-                    else => return err,
-                }
-            },
-            .cd => try execCd(ctx, stdout, args),
-            .pwd => try execPwd(ctx, stdout, args),
-        }
-    } else if (findExecutable(ctx.alloc, ctx.io, ctx.cwd, path_env, cmd_str)) |exe_path| {
-        var args_list: std.ArrayList([]const u8) = .empty;
-        defer args_list.deinit(ctx.alloc);
-
-        try args_list.append(ctx.alloc, exe_path);
-
-        var it = try std.process.Args.IteratorGeneral(.{}).init(ctx.alloc, args);
-        defer it.deinit();
-        while (it.next()) |arg| {
-            try args_list.append(ctx.alloc, arg);
-        }
-
-        var child = try std.process.spawn(ctx.io, .{
-            .argv = args_list.items,
-        });
-        defer child.kill(ctx.io);
-
-        const term = try child.wait(ctx.io);
-        _ = term;
+    const cmd_name = try std.mem.join(ctx.alloc, " ", argv);
+    if (Cmd.fromString(cmd_name)) |_| {
+        try stdout.print("{s} is a shell builtin\n", .{cmd_name});
+    } else if (findExecutable(ctx.alloc, ctx.io, ctx.cwd, path_env, cmd_name)) |exe_path| {
+        try stdout.print("{s} is {s}\n", .{ cmd_name, exe_path });
     } else |err| switch (err) {
-        FindExecutableError.NotFound => try stdout.print("{s}: command not found\n", .{line}),
+        FindExecutableError.NotFound => try stdout.print("{s}: not found\n", .{cmd_name}),
         else => return err,
     }
 }
 
-fn execCd(ctx: Context, stdout: *std.Io.Writer, args: []const u8) !void {
-    const path = try expandPath(ctx.alloc, ctx.environ, args);
+fn execCd(ctx: Context, stdout: *std.Io.Writer, argv: []const []const u8) !void {
+    if (argv.len != 1) {
+        try stdout.print("Too many args for cd command\n", .{});
+        return;
+    }
+
+    const target_path = argv[0];
+    const path = try expandPath(ctx.alloc, ctx.environ, target_path);
     std.process.setCurrentPath(ctx.io, path) catch |err| switch (err) {
-        std.process.SetCurrentPathError.FileNotFound => try stdout.print("cd {s}: No such file or directory\n", .{args}),
+        std.process.SetCurrentPathError.FileNotFound => try stdout.print("cd {s}: No such file or directory\n", .{target_path}),
         else => return err,
     };
 }
 
-fn execPwd(ctx: Context, stdout: *std.Io.Writer, _: []const u8) !void {
+fn execPwd(ctx: Context, stdout: *std.Io.Writer, _: []const []const u8) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try std.process.currentPath(ctx.io, &buf);
     try stdout.print("{s}\n", .{buf[0..n]});
@@ -133,12 +148,12 @@ fn execPwd(ctx: Context, stdout: *std.Io.Writer, _: []const u8) !void {
 
 const FindExecutableError = error{NotFound};
 
-fn findExecutable(alloc: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path_env: []const u8, args: []const u8) ![]const u8 {
+fn findExecutable(alloc: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path_env: []const u8, cmd_name: []const u8) ![]const u8 {
     var paths_iter = std.mem.splitScalar(u8, path_env, std.fs.path.delimiter);
     while (paths_iter.next()) |path_str| {
         if (path_str.len == 0) continue;
 
-        const exe_path = try std.fs.path.join(alloc, &[_][]const u8{ path_str, args });
+        const exe_path = try std.fs.path.join(alloc, &[_][]const u8{ path_str, cmd_name });
         defer alloc.free(exe_path);
 
         const exe_stat = cwd.statFile(io, exe_path, .{}) catch continue; // ignore any errors and move on
